@@ -1,0 +1,156 @@
+#!/usr/bin/env perl 
+
+use strict;
+use warnings;
+
+use File::Spec;
+use Getopt::Long;
+use IO::Handle;
+
+my $invert_match = 0;
+my $verbose = 0;
+my $show_how = 0;
+my $prefix;
+GetOptions(
+        'invert-match|v' => \$invert_match,
+        'verbose'        => \$verbose,
+        'show-how'       => \$show_how,
+        'prefix|p=s'     => \$prefix,
+    ) and (@ARGV >= 2) or die <<EOF
+Usage: $0 [options] <header> <files...>
+
+Find all files including the specified header, possibly indirectly, i.e. by
+including another header including it.
+
+For example:
+
+    $0 stdio.h include/**/*.h
+
+Options:
+    -p, --prefix            Prefix used for including the files, e.g. "wx".
+    --show-how              Show the header directly included by each match.
+    --verbose               Show progress messages while examining the files.
+    -v, --invert-match      Show all files not including the given header.
+EOF
+    ;
+
+die "--show-how doesn't make sense with --invert-match\n"
+    if $invert_match && $show_how;
+
+$prefix =~ s{[/\\]+$}{} if defined $prefix;
+die "--prefix option can only be a single path component\n"
+    if $prefix =~ m{[/\\]};
+
+# Show progress messages immediately.
+STDOUT->autoflush(1) if $verbose;
+
+my $header = shift @ARGV;
+
+sub make_re_include
+{
+    my ($header) = @_;
+
+    qr{
+        ^ \s* \# \s* include \s+
+        (?:
+            <\Q$header\E>
+          |
+            "\Q$header\E"
+        )
+        \s* $
+      }xm;
+}
+
+my $re = make_re_include($header);
+
+# Hash indexed by file names, value is the name of the file included by the
+# key which results in the inclusion of the target header.
+my %matches;
+
+# List of files found to include the header at the current step.
+my @last_found;
+
+print "Examining ", scalar(@ARGV), " files...\n" if $verbose;
+
+# Read the contents of all files into memory. This is brute force at its
+# finest: it's as simple as it gets, and yet should still work without
+# problems for any reasonable code base on any modern machine.
+my %files;
+foreach my $path (@ARGV) {
+    my $contents = do { local(@ARGV, $/) = $path; <> };
+
+    # This horrible thing comes directly from the Perl FAQ:
+    #
+    # http://learn.perl.org/faq/perlfaq6.html#How-do-I-use-a-regular-expression-to-strip-C-style-comments-from-a-file
+    #
+    # and should be just taken as a black box.
+    $contents =~ s{/\*[^*]*\*+([^/*][^*]*\*+)*/|//([^\\]|[^\n][\n]?)*?\n|("(\\.|[^"\\])*"|'(\\.|[^'\\])*'|.[^/"'\\]*)}{defined $3 ? $3 : ""}gse;
+
+    my ($volume, $directories, $f) = File::Spec->splitpath($path);
+    if (defined $prefix) {
+        # We need to preserve the path components from the one given as
+        # prefix, as the idea is that headers in the subdirectory with this
+        # prefix are included by their path starting from it.
+        my @dirs;
+        foreach my $dir (reverse File::Spec->splitdir($directories)) {
+            unshift @dirs, $dir;
+
+            next if $dir ne $prefix;
+
+            $f = File::Spec->catpath('', File::Spec->catdir(@dirs), $f);
+            last;
+        }
+    }
+
+    $files{$f} = $contents;
+    if ($contents =~ $re) {
+        $matches{$f} = $header;
+        push @last_found, $f
+    }
+}
+
+while (@last_found) {
+    print "\tfound ", scalar(@last_found), " more matches\n" if $verbose;
+
+    my @new_found;
+
+    foreach my $m (@last_found) {
+        my $re = make_re_include($m);
+        foreach my $f (keys %files) {
+            # No need to check if we already know that this file includes the
+            # header.
+            next if $matches{$f};
+
+            if ($files{$f} =~ $re) {
+                $matches{$f} = $m;
+                push @new_found, $f;
+            }
+        }
+    }
+
+    @last_found = @new_found;
+}
+
+print "Found ", scalar(keys %matches), " total matches.\n\n" if $verbose;
+
+if ($invert_match) {
+    foreach my $f (keys %files) {
+        print "$f\n" unless exists $matches{$f};
+    }
+} else {
+    foreach my $f (sort keys %matches) {
+        print "$f";
+        if ($show_how) {
+            my $f2 = $f;
+            while (1) {
+                my $f3 = $matches{$f2};
+                print " -> $f3";
+                last if $f3 eq $header;
+                $f2 = $f3;
+            }
+        }
+        print "\n";
+    }
+}
+
+exit 0
