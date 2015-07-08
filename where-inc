@@ -37,9 +37,11 @@ EOF
 die "--show-how doesn't make sense with --invert-match\n"
     if $invert_match && $show_how;
 
-$prefix =~ s{[/\\]+$}{} if defined $prefix;
-die "--prefix option can only be a single path component\n"
-    if $prefix =~ m{[/\\]};
+if (defined $prefix) {
+    $prefix =~ s{[/\\]+$}{};
+    die "--prefix option can only be a single path component\n"
+        if $prefix =~ m{[/\\]};
+}
 
 # Show progress messages immediately.
 STDOUT->autoflush(1) if $verbose;
